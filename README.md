@@ -11,7 +11,7 @@ FilingFetcher is a small Python application that leans on the [`john-friedman/se
 
 1. **Install dependencies** – the `requirements.txt` file pins everything the app needs, including the secbrowser plugin:
 ls -l start_dev.sh
-   ```bash
+   ```bash1
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt

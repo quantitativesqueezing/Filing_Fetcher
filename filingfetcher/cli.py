@@ -10,12 +10,18 @@ import os
 import signal
 import sys
 from contextlib import suppress
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .analysis import FilingAnalyzer
 from .fetcher import FilingContentFetcher
 from .metadata import MetadataRepository
 from .monitor import FilingMonitor
-from .reporters import ConsoleReporter, JsonReporter
+from .reporters import ConsoleReporter, DiscordReporter, JsonReporter, load_discord_webhooks
+from .discord_threads import DiscordThreadPoller
 
 DEFAULT_EXCHANGES = ("NASDAQ", "NYSE", "ARCA", "AMEX")
 DEFAULT_USER_AGENT = os.environ.get("SEC_USER_AGENT", "FilingFetcher/0.1 (contact@example.com)")
@@ -54,9 +60,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reporter",
-        choices=("console", "json"),
+        choices=("console", "json", "discord"),
         default="console",
         help="Reporting format (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--discord-mode",
+        choices=("prod", "test"),
+        default="prod",
+        help="Which Discord webhook mapping to use (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Use DISCORD_WEBHOOK_TEST_URL webhooks and Discord thread polling.",
+    )
+    parser.add_argument(
+        "--discord-template",
+        default=os.environ.get("DISCORD_WEBHOOK_TEMPLATE"),
+        help="Optional path to a JSON Discord webhook payload template.",
     )
     parser.add_argument(
         "--log-level",
@@ -92,7 +114,17 @@ def main(argv: list[str] | None = None) -> int:
     metadata_repo = MetadataRepository()
     fetcher = FilingContentFetcher(user_agent=args.user_agent)
     analyzer = FilingAnalyzer()
-    reporter = ConsoleReporter() if args.reporter == "console" else JsonReporter()
+    discord_mode = "test" if args.test else args.discord_mode
+
+    webhook_mapping = load_discord_webhooks("test" if discord_mode == "test" else "prod")
+
+    if args.reporter == "console":
+        reporter = ConsoleReporter()
+    elif args.reporter == "json":
+        reporter = JsonReporter()
+    else:
+        template_path = Path(args.discord_template) if args.discord_template else None
+        reporter = DiscordReporter(webhook_mapping=webhook_mapping, template_path=template_path)
 
     monitor = FilingMonitor(
         metadata_repository=metadata_repo,
@@ -105,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         validation_interval_seconds=args.validate,
         quiet=args.quiet,
     )
+
+    bot_token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_API_TOKEN")
+    poller = DiscordThreadPoller(webhook_mapping, poll_interval_seconds=60, bot_token=bot_token, stream=sys.stdout)
 
     stop_requested = False
 
@@ -121,9 +156,13 @@ def main(argv: list[str] | None = None) -> int:
         with suppress(Exception):
             signal.signal(sig, _handle_signal)
 
+    poller.poll_once()
+    poller.start()
+
     try:
         monitor.start()
     finally:
+        poller.stop()
         fetcher.close()
 
     return 0

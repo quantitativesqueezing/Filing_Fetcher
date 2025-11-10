@@ -56,17 +56,29 @@ class FilingEvent:
     submission_metadata: Dict[str, Any] = field(default_factory=dict)
     rss_metadata: Optional[Dict[str, Any]] = None
 
+    def normalized_cik(self) -> str:
+        """Return the CIK with leading zeros removed (or original if all zeros)."""
+        stripped = self.cik.lstrip("0")
+        return stripped or self.cik
+
+    def accession_no_dashes(self) -> str:
+        """Return accession number without dash separators."""
+        return self.accession.replace("-", "")
+
     def sec_txt_url(self) -> str:
         """Return the canonical SEC URL for the raw submission text."""
-        acc_no_dash = self.accession.replace("-", "")
-        try:
-            cik_component = str(int(self.cik))
-        except ValueError:
-            cik_component = self.cik.lstrip("0") or self.cik
+        acc_no_dash = self.accession_no_dashes()
+        cik_component = self.normalized_cik()
         return (
             f"https://www.sec.gov/Archives/edgar/data/{cik_component}/"
             f"{acc_no_dash}/{self.accession}.txt"
         )
+
+    def sec_archive_base_url(self) -> str:
+        """Return the base SEC archive URL for documents in this submission."""
+        acc_no_dash = self.accession_no_dashes()
+        cik_component = self.normalized_cik()
+        return f"https://www.sec.gov/Archives/edgar/data/{cik_component}/{acc_no_dash}/"
 
 
 @dataclass
