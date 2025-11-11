@@ -1,0 +1,40 @@
+{
+  "username": "FilingFetcher Bot",
+  "avatar_url": "https://media.discordapp.net/attachments/1435335169803554946/1435335170273312941/d71f33a476332815b5068e3e37cdf3ae5bd85fe0-1536x1024.webp?ex=69122f0b&is=6910dd8b&hm=cc55ed0c50685de754cef532c6e8df1b231dd8c22e4d1195b1b8c9127208f324&=&format=webp&width=1564&height=1042",
+  "content": "",
+  "embeds": [
+    {
+      "author": {
+        "name": "SEC Filing Alert",
+        "url": "https://x.com/FloridaManFin",
+        "icon_url": "https://media.discordapp.net/attachments/1435335169803554946/1435335170273312941/d71f33a476332815b5068e3e37cdf3ae5bd85fe0-1536x1024.webp?ex=69122f0b&is=6910dd8b&hm=cc55ed0c50685de754cef532c6e8df1b231dd8c22e4d1195b1b8c9127208f324&=&format=webp&width=1564&height=1042"
+      },
+      "title": "$${ticker} | {documents.documents.0.type}",
+      "url": "{documents.documents.0.url}",
+      "description": "",
+      "color": 1210347,
+      "fields": [
+        {
+          "name": "Company",
+          "value": "{feed_entry.company}",
+          "inline": false
+        },
+        {
+          "name": "Report Type",
+          "value": "{documents.documents.0.type}",
+          "inline": false
+        },
+        {
+          "name": "Release Time",
+          "value": "{feed_entry.release_display}",
+          "inline": false
+        },
+        {
+          "name": "Links",
+          "value": "{feed_entry.links}",
+          "inline": false
+        }
+      ]
+    }
+  ]
+}
