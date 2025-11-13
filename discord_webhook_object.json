@@ -25,6 +25,16 @@
           "inline": false
         },
         {
+          "name": "Summary",
+          "value": "{summary}",
+          "inline": false
+        },
+        {
+          "name": "Signal",
+          "value": "**{signal.label}** - {signal.reason}",
+          "inline": false
+        },
+        {
           "name": "Release Time",
           "value": "{feed_entry.release_display}",
           "inline": false

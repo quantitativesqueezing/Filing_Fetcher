@@ -42,9 +42,92 @@ DEFAULT_POLL_INTERVAL = 7.0
 DEFAULT_FEED_BASE = "https://www.sec.gov/cgi-bin/browse-edgar"
 ENV_FILE = REPO_ROOT / ".env"
 WEBHOOK_PAIR_RE = re.compile(r"\"([^\"]+)\"\s*=>\s*\"([^\"]*)\"")
+
+
+def _read_env_value(var_name: str) -> Optional[str]:
+    if not ENV_FILE.exists():
+        return None
+    text = ENV_FILE.read_text()
+    pattern = re.compile(rf"^{var_name}\s*=\s*(.+)$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    raw_val = match.group(1).strip()
+    if raw_val.endswith("#"):
+        raw_val = raw_val.split("#", 1)[0].strip()
+    if raw_val.startswith("\"") and raw_val.endswith("\""):
+        raw_val = raw_val[1:-1]
+    return raw_val
+
+
+def _env_or_default(var: str, fallback: Optional[str] = None) -> Optional[str]:
+    val = os.environ.get(var)
+    if not val:
+        val = _read_env_value(var)
+    if val:
+        val = os.path.expandvars(val)
+        val = val.replace("\\ ", " ")
+        return val
+    return fallback
 PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
 DOLLAR_PLACEHOLDER_RE = re.compile(r"\$\{([^{}]+)\}")
 DiscordTarget = Tuple[str, Optional[str]]
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+MAX_SUMMARY_CHARS = 600
+MAX_TEXT_CHARS = 12000
+SUMMARY_SKIP_PATTERNS = [
+    re.compile(r"^(united states\s+)?securities and exchange commission", re.I),
+    re.compile(r"^washington,? d\.c", re.I),
+    re.compile(r"^schedule\s+\d", re.I),
+    re.compile(r"^schedule\s+13", re.I),
+    re.compile(r"^form\s+[0-9a-z]+", re.I),
+    re.compile(r"^item\s+\d", re.I),
+    re.compile(r"^table of contents", re.I),
+    re.compile(r"^under the securities", re.I),
+    re.compile(r"^name of reporting person", re.I),
+    re.compile(r"^\(name, address", re.I),
+    re.compile(r"^date of event", re.I),
+]
+HEADER_SKIP_PATTERNS = [
+    re.compile(r"^(united states\s+)?securities and exchange commission", re.I),
+    re.compile(r"^washington,? d\.c", re.I),
+    re.compile(r"^schedule\s+\d", re.I),
+    re.compile(r"^schedule\s+13", re.I),
+    re.compile(r"^form\s+[0-9a-z]+", re.I),
+    re.compile(r"^table of contents", re.I),
+    re.compile(r"^under the securities", re.I),
+    re.compile(r"^name of reporting person", re.I),
+    re.compile(r"^\(name, address", re.I),
+    re.compile(r"^date of event", re.I),
+    re.compile(r"^cusip", re.I),
+]
+SUMMARY_KEYWORD_HINTS = [
+    "announce",
+    "report",
+    "disclos",
+    "entered",
+    "execute",
+    "acquir",
+    "results",
+    "trial",
+    "agreement",
+    "merger",
+    "offering",
+]
+ITEM_HEADER_RE = re.compile(r"^item\s+(\d+)[\w\s\.]*(.*)$", re.I | re.M)
+ITEM_PRIORITY = {
+    8: 0,
+    4: 1,
+    5: 2,
+    3: 3,
+    6: 4,
+    7: 5,
+    2: 6,
+    1: 7,
+}
+
+LOG_FILE_PATH_DEFAULT = _env_or_default("LOG_FILE_PATH", str(REPO_ROOT / "webhook_post_log.json")) or str(REPO_ROOT / "webhook_post_log.json")
+DISCORD_TEMPLATE_DEFAULT = _env_or_default("DISCORD_WEBHOOK_TEMPLATE", str(REPO_ROOT / "discord_webhook_object.json")) or str(REPO_ROOT / "discord_webhook_object.json")
 
 
 def build_feed_url(count: int, owner: str = "exclude", base: str = DEFAULT_FEED_BASE) -> str:
@@ -94,6 +177,151 @@ def format_release_timestamp(value: Optional[str]) -> Optional[str]:
     if not time_part:
         time_part = dt.strftime("%I:%M%p")
     return f"{date_part} - {time_part.lower()}"
+
+
+def extract_plain_text(payload: str) -> str:
+    soup = BeautifulSoup(payload, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    text = text.replace("\r", "")
+    text = re.sub(r"[\t ]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n\n", text)
+    return text.strip()
+
+
+def summarize_document(text: str, entry: Dict) -> str:
+    form_type = entry.get("form_type") or "Filing"
+    company = entry.get("company") or "the issuer"
+    if not text:
+        return f"{form_type} for {company} received with limited detail available."
+    text = _strip_leading_headers(text)
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    item_sentences = _extract_item_section_sentences(text)
+    if item_sentences:
+        joined = " ".join(item_sentences)[:MAX_SUMMARY_CHARS].strip()
+        joined = re.sub(r"\s+", " ", joined)
+        if joined:
+            return joined
+    sentences: List[str] = []
+    for para in paragraphs:
+        sentences.extend([s.strip() for s in SENTENCE_SPLIT_RE.split(para) if s.strip()])
+
+    meaningful = [s for s in sentences if _is_informative_sentence(s)]
+    keyword_hits = [s for s in meaningful if _contains_summary_keyword(s)]
+    if keyword_hits:
+        remaining = [s for s in meaningful if s not in keyword_hits]
+        meaningful = keyword_hits + remaining
+    if not meaningful:
+        meaningful = [p for p in paragraphs if _paragraph_informative(p)]
+    if not meaningful:
+        meaningful = sentences[:2] if sentences else paragraphs[:1]
+    summary = " ".join(meaningful[:2]) if meaningful else text[:200]
+    summary = summary[:MAX_SUMMARY_CHARS].strip()
+    summary = re.sub(r"\s+", " ", summary)
+    return summary
+
+
+def _is_informative_sentence(sentence: str) -> bool:
+    cleaned = sentence.strip()
+    if len(cleaned) < 40:
+        return False
+    letters = [c for c in cleaned if c.isalpha()]
+    if letters:
+        upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if upper_ratio > 0.8:
+            return False
+    lower_clean = cleaned.lower()
+    for pattern in SUMMARY_SKIP_PATTERNS:
+        if pattern.match(cleaned) or pattern.match(lower_clean):
+            return False
+    return True
+
+
+def _paragraph_informative(paragraph: str) -> bool:
+    cleaned = paragraph.strip()
+    if len(cleaned) < 60:
+        return False
+    return _is_informative_sentence(cleaned)
+
+
+def _extract_item_section_sentences(text: str) -> Optional[List[str]]:
+    candidates: List[Tuple[int, List[str]]] = []
+    matches = list(ITEM_HEADER_RE.finditer(text))
+    for idx, match in enumerate(matches):
+        try:
+            item_no = int(match.group(1))
+        except (TypeError, ValueError):
+            item_no = None
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        if not section_text:
+            continue
+        sentences = [s.strip() for s in SENTENCE_SPLIT_RE.split(section_text) if _is_informative_sentence(s)]
+        if sentences:
+            priority = ITEM_PRIORITY.get(item_no, len(ITEM_PRIORITY) + 1)
+            candidates.append((priority, sentences[:2]))
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+    return None
+
+
+def _contains_summary_keyword(sentence: str) -> bool:
+    lower = sentence.lower()
+    return any(keyword in lower for keyword in SUMMARY_KEYWORD_HINTS)
+
+
+def _strip_leading_headers(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines()]
+    body: List[str] = []
+    skipping = True
+    for line in lines:
+        if not line:
+            continue
+        if skipping and _looks_like_header_line(line):
+            continue
+        skipping = False
+        body.append(line)
+    result = "\n".join(body) if body else text
+    lower_result = result.lower()
+    item_idx = lower_result.find("item ")
+    if item_idx > 0 and item_idx < 4000:
+        result = result[item_idx:]
+    return result
+
+
+def _looks_like_header_line(line: str) -> bool:
+    lower = line.lower()
+    for pattern in HEADER_SKIP_PATTERNS:
+        if pattern.match(line) or pattern.match(lower):
+            return True
+    header_keywords = [
+        "cusip",
+        "commission file",
+        "sec.gov",
+        "washington",
+        "state of",
+    ]
+    if any(keyword in lower for keyword in header_keywords):
+        return True
+    letters = [c for c in line if c.isalpha()]
+    if letters:
+        upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if upper_ratio > 0.8:
+            return True
+    return False
+
+
+def derive_signal(entry: Dict, summary: str, text: str) -> Dict[str, str]:
+    form_type = entry.get("form_type") or "filing"
+    company = entry.get("company") or "the issuer"
+    label = "neutral"
+    reason = f"No automated signal rules configured for {form_type}."
+    return {
+        "label": label,
+        "reason": reason,
+        "company": company,
+    }
 
 
 def _entry_to_json(entry: ET.Element) -> Dict:
@@ -185,7 +413,14 @@ def load_discord_targets(use_test: bool) -> List[DiscordTarget]:
 
 
 class DiscordDispatcher:
-    def __init__(self, template_path: Path, targets: List[DiscordTarget], user_agent: str) -> None:
+    def __init__(
+        self,
+        template_path: Path,
+        targets: List[DiscordTarget],
+        user_agent: str,
+        log_path: Optional[Path] = None,
+        bot_token: Optional[str] = None,
+    ) -> None:
         if not targets:
             raise ValueError("At least one Discord webhook must be configured")
         self.template_path = template_path
@@ -195,18 +430,39 @@ class DiscordDispatcher:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": user_agent})
         self.logger = logging.getLogger("sec_feed.discord")
+        self.log_path = log_path
+        self._sent_cache: Dict[str, Set[str]] = self._load_log()
+        self.bot_token = bot_token
+        self.api_session: Optional[requests.Session] = None
+        if bot_token:
+            api_session = requests.Session()
+            api_session.headers.update(
+                {
+                    "Authorization": f"Bot {bot_token}",
+                    "User-Agent": user_agent,
+                }
+            )
+            self.api_session = api_session
+        self._forum_parent_cache: Dict[str, Optional[str]] = {}
+        self._forum_threads_cache: Dict[str, Tuple[float, List[Dict]]] = {}
 
-    def dispatch(self, context: Dict) -> None:
+    def dispatch(self, context: Dict, doc_url: Optional[str]) -> None:
         payload = self._render(context)
+        unique_url = doc_url or context.get("primary_document_url")
+        ticker = (context.get("ticker") or context.get("feed_entry", {}).get("ticker") or "").strip()
+        print(ticker);
         for url, thread in self.targets:
-            params: Dict[str, str] = {"wait": "true"}
-            if thread:
-                params["thread_id"] = thread
-            try:
-                resp = self.session.post(url, params=params, json=payload, timeout=20)
-                resp.raise_for_status()
-            except requests.RequestException as exc:
-                self.logger.warning("Discord webhook failed (%s): %s", url, exc)
+            forum_channel = self._resolve_forum_channel(thread)
+            print(forum_channel)
+            self._send_webhook(url, thread, payload, unique_url)
+            if forum_channel and ticker:
+                self._post_to_matching_forum_threads(
+                    url=url,
+                    forum_channel_id=forum_channel,
+                    payload=payload,
+                    unique_url=unique_url,
+                    ticker=ticker,
+                )
 
     def _render(self, context: Dict) -> Dict:
         return self._transform(copy.deepcopy(self.template), context)
@@ -249,6 +505,133 @@ class DiscordDispatcher:
             return ""
         return str(current)
 
+    def _target_key(self, url: str, thread: Optional[str]) -> str:
+        return f"{url}|{thread or ''}"
+
+    def _load_log(self) -> Dict[str, Set[str]]:
+        if not self.log_path or not self.log_path.exists():
+            return {}
+        try:
+            data = json.loads(self.log_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return {k: set(v) for k, v in data.items() if isinstance(v, list)}
+
+    def _persist_log(self) -> None:
+        if not self.log_path:
+            return
+        payload = {k: sorted(list(v)) for k, v in self._sent_cache.items()}
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.log_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2))
+        tmp_path.replace(self.log_path)
+
+    def _already_sent(self, key: str, url: str) -> bool:
+        return url in self._sent_cache.get(key, set())
+
+    def _mark_sent(self, key: str, url: str) -> None:
+        self._sent_cache.setdefault(key, set()).add(url)
+        self._persist_log()
+
+    def _send_webhook(self, url: str, thread: Optional[str], payload: Dict, unique_url: Optional[str]) -> bool:
+        key = self._target_key(url, thread)
+        if unique_url and self._already_sent(key, unique_url):
+            self.logger.info("Skipping Discord post for %s; already sent to target %s", unique_url, key)
+            return False
+        params: Dict[str, str] = {"wait": "true"}
+        if thread:
+            params["thread_id"] = thread
+        try:
+            resp = self.session.post(url, params=params, json=payload, timeout=20)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            self.logger.warning("Discord webhook failed (%s): %s", url, exc)
+            return False
+        if unique_url:
+            self._mark_sent(key, unique_url)
+        return True
+
+    def _resolve_forum_channel(self, channel_or_thread_id: Optional[str]) -> Optional[str]:
+        if not channel_or_thread_id or not self.api_session:
+            return None
+        if channel_or_thread_id in self._forum_parent_cache:
+            return self._forum_parent_cache[channel_or_thread_id]
+        try:
+            resp = self.api_session.get(f"https://discord.com/api/v10/channels/{channel_or_thread_id}", timeout=20)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            self.logger.debug("Unable to inspect Discord channel %s (%s)", channel_or_thread_id, exc)
+            self._forum_parent_cache[channel_or_thread_id] = None
+            return None
+        data = resp.json()
+        p_id = data.get("parent_id")
+        channel_type = data.get("type")
+        forum_channel = None
+        if channel_type in (10, 11, 12) and p_id:
+            forum_channel = str(p_id)
+        elif channel_type == 15:
+            forum_channel = str(data.get("id"))
+        elif channel_type == 0 and p_id:
+            forum_channel = str(p_id)
+        self._forum_parent_cache[channel_or_thread_id] = forum_channel
+        return forum_channel
+
+    def _post_to_matching_forum_threads(
+        self,
+        url: str,
+        forum_channel_id: str,
+        payload: Dict,
+        unique_url: Optional[str],
+        ticker: str,
+    ) -> None:
+        if not self.api_session or not ticker:
+            return
+        ticker_clean = ticker.upper().lstrip("$")
+        desired_names = {ticker_clean, f"${ticker_clean}"}
+        threads = self._fetch_forum_threads(forum_channel_id)
+        if not threads:
+            return
+        matches: List[Dict] = []
+        for t in threads:
+            name = t.get("name")
+            if not isinstance(name, str):
+                continue
+            normalized = name.strip().upper()
+            if normalized in desired_names:
+                matches.append(t)
+        for thread in matches:
+            thread_id = str(thread.get("id"))
+            if not thread_id:
+                continue
+            self._send_webhook(url, thread_id, payload, unique_url)
+
+    def _fetch_forum_threads(self, forum_channel_id: str) -> List[Dict]:
+
+        print(forum_channel_id)
+
+        now = time.time()
+        cached = self._forum_threads_cache.get(forum_channel_id)
+        if cached and (now - cached[0]) < 300:
+            return cached[1]
+        threads: List[Dict] = []
+        for endpoint in (
+            f"https://discord.com/api/v10/channels/{forum_channel_id}/threads/active",
+            f"https://discord.com/api/v10/channels/{forum_channel_id}/threads/archived/public",
+        ):
+            try:
+                resp = self.api_session.get(endpoint, timeout=20)
+                if resp.status_code == 403:
+                    self.logger.warning("Discord bot lacks permission to list threads for %s", forum_channel_id)
+                    break
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                self.logger.debug("Unable to fetch threads for %s (%s)", forum_channel_id, exc)
+                continue
+            data = resp.json()
+            threads.extend(data.get("threads", []))
+        self._forum_threads_cache[forum_channel_id] = (now, threads)
+        return threads
+
 def _entry_priority(entry: Dict) -> int:
     role = (entry.get("role") or "").lower()
     if "subject" in role:
@@ -286,6 +669,8 @@ class LatestFilingsPoller:
                 "Accept": "application/atom+xml,application/xml",
             }
         )
+        self.download_session = requests.Session()
+        self.download_session.headers.update({"User-Agent": user_agent})
         self.logger = logging.getLogger("sec_feed.poller")
         self._etag: Optional[str] = None
         self._last_modified: Optional[str] = None
@@ -409,6 +794,15 @@ class LatestFilingsPoller:
         entry["ticker"] = ticker
         documents_payload["ticker"] = ticker
         primary_doc_url = self._primary_document_url(documents_payload) or filing_url
+        doc_text = self._fetch_document_text(primary_doc_url)
+        summary = summarize_document(doc_text, entry)
+        signal = derive_signal(entry, summary, doc_text)
+        entry["summary"] = summary
+        entry["signal"] = signal
+        entry["primary_document_url"] = primary_doc_url
+        documents_payload["summary"] = summary
+        documents_payload["signal"] = signal
+        documents_payload["primary_document_url"] = primary_doc_url
         entry["links"] = self._build_links(primary_doc_url, ticker)
         ndjson_lines = list(to_ndjson(documents_payload))
         output = {
@@ -416,11 +810,14 @@ class LatestFilingsPoller:
             "documents": documents_payload,
             "ndjson": ndjson_lines,
             "ticker": ticker,
+            "summary": summary,
+            "signal": signal,
+            "primary_document_url": primary_doc_url,
         }
         json_str = json.dumps(output, indent=None if self.compact else 2)
         print(json_str, flush=True)
         if self.dispatcher:
-            self.dispatcher.dispatch(output)
+            self.dispatcher.dispatch(output, primary_doc_url)
         self._processed_count += 1
 
     def _resolve_ticker(self, entry: Dict) -> Optional[str]:
@@ -428,6 +825,18 @@ class LatestFilingsPoller:
             return None
         cik = entry.get("cik") or entry.get("feed_entry", {}).get("cik")
         return self.ticker_lookup.lookup(cik)
+
+    def _fetch_document_text(self, url: Optional[str]) -> str:
+        if not url:
+            return ""
+        try:
+            resp = self.download_session.get(url, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            self.logger.warning("Unable to download primary document %s (%s)", url, exc)
+            return ""
+        text = extract_plain_text(resp.text)
+        return text[:MAX_TEXT_CHARS]
 
     def _primary_document_url(self, documents_payload: Dict) -> Optional[str]:
         docs = documents_payload.get("documents") or []
@@ -446,13 +855,12 @@ class LatestFilingsPoller:
 
         query = ticker.strip() if ticker else ''
         if query:
-            twitter_url = f'https://x.com/search?q={quote_plus(query)}&src=typed_query'
+            twitter_url = f'https://x.com/search?q=${quote_plus(query)}&src=typed_query'
             stocktwits_url = f'https://stocktwits.com/symbol/{quote_plus(query)}'
             links.append(f'[Twitter]({twitter_url})')
             links.append(f'[Stocktwits]({stocktwits_url})')
 
         return ' | '.join(links)
-
 
 PLACEHOLDER_TOKENS = {"contact@example.com", "name@example.com"}
 
@@ -509,8 +917,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--discord-template",
-        default=str(REPO_ROOT / "discord_webhook_object.json"),
-        help="Path to the Discord webhook JSON template (default: discord_webhook_object.json).",
+        default=DISCORD_TEMPLATE_DEFAULT,
+        help="Path to the Discord webhook JSON template (default: DISCORD_WEBHOOK_TEMPLATE or discord_webhook_object.json).",
+    )
+    parser.add_argument(
+        "--discord-log",
+        default=LOG_FILE_PATH_DEFAULT,
+        help="Path to the JSON file used to track which filings have been posted to Discord (default: LOG_FILE_PATH).",
+    )
+    parser.add_argument(
+        "--discord-bot-token",
+        default=os.environ.get("DISCORD_BOT_TOKEN"),
+        help="Bot token used to query Discord APIs (required for forum thread routing).",
     )
     parser.add_argument(
         "--max-results",
@@ -546,7 +964,14 @@ def main() -> None:
         if not targets:
             which = "DISCORD_WEBHOOK_TEST_URL" if args.test else "DISCORD_WEBHOOK_URL"
             raise SystemExit(f"No webhooks configured for {which}. Check your environment or .env file.")
-        dispatcher = DiscordDispatcher(template_path, targets, user_agent=user_agent)
+        log_path = Path(args.discord_log).expanduser() if args.discord_log else None
+        dispatcher = DiscordDispatcher(
+            template_path,
+            targets,
+            user_agent=user_agent,
+            log_path=log_path,
+            bot_token=args.discord_bot_token,
+        )
 
     poller = LatestFilingsPoller(
         feed_url=feed_url,

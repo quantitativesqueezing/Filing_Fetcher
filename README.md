@@ -30,6 +30,7 @@ A lightweight Python utility that polls the SEC EDGAR Latest Filings Atom feed, 
    - `--compact` emits one-line JSON blocks that are easy to pipe into `jq`.
    - `--count 100` asks the feed for more rows per poll if you need deeper backfill.
    - `--doc-delay 1.0` widens the pause between filing downloads if you want to be extra conservative.
+   - `--discord --discord-bot-token $DISCORD_BOT_TOKEN` turns on webhook dispatch (optionally pointing to test channels with `--test`), automatically routes filings into ticker-specific forum threads named like `$AAPL`, and deduplicates posts via `--discord-log`.
 
 ## Output
 
@@ -39,6 +40,7 @@ Each processed filing produces a JSON object on stdout:
 - `feed_entry.links` contains a pre-rendered HTML snippet with shortcuts to the SEC filing and a ticker-specific Twitter search, suitable for Discord embeds or web dashboards.
 - `documents` is the structure returned by `sec_feed.parser.fetch_index_documents` (accession number, index URL, parsed document table, and the complete submission link).
 - `ndjson` contains newline-delimited JSON strings for each document row so you can stream them elsewhere without reparsing.
+- `summary` is a concise synopsis (≤2 sentences) extracted from the filing's primary document; `signal` is a placeholder structure (`label`, `reason`) ready for bullish/bearish heuristics you can add later.
 
 Redirect stdout if you want to persist the feed, e.g. `python scripts/watch_sec_filings.py ... > filings.jsonl`.
 
@@ -65,4 +67,6 @@ FilingFetcher/
 - Set the `SEC_USER_AGENT` environment variable once and both scripts will pick it up automatically. You can still override it per run via `--user-agent`.
 - Ticker symbols are sourced from the SEC's official `company_tickers.json` dataset and attached to every emission; if a filing is for an entity without a listed ticker the JSON will include `"ticker": null` explicitly.
 - When multiple Atom entries exist for the same accession (e.g., "Filed by" and "Subject" pairs for Schedule 13D/G forms), the watcher now prioritises the "Subject" record so the `ticker` always reflects the company the filing is catalogued under rather than the filer.
+- The optional `--discord` workflow now accepts `--discord-log` (default `webhook_post_log.json`) and skips any filing whose SEC document URL was already posted to a given webhook/thread, preventing duplicate spam across restarts.
+- When a webhook mapping supplies a channel/thread ID (see `.env`), the dispatcher treats it as a Discord Forum channel: it uses the provided bot token to enumerate threads, finds any `$TICKER` threads that match the filing’s symbol, and posts the embed there too (without duplicating messages that already contain the filing URL).
 - If you are piping the JSON into another service, consider adding your own backoff/retry layer for the downstream webhook call so the poller can stay focused on feeding you fresh SEC data.
