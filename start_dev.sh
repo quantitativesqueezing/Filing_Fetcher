@@ -6,7 +6,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # *** To run the fetcher manually, use the command below ***
-python3 -m filingfetcher --user-agent "FilingFetcher/0.1 (floridamanfinance@gmail.com)" --poll 7 --validate 300
+python3 -m filing_fetcher --user-agent "Filing_Fetcher/0.1 (floridamanfinance@gmail.com)" --poll 7 --validate 300
 
 
 # *** Run the launchctl job manually ***

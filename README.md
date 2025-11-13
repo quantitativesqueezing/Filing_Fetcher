@@ -1,4 +1,4 @@
-# FilingFetcher
+# Filing_Fetcher
 A lightweight Python utility that polls the SEC EDGAR Latest Filings Atom feed, converts each entry to JSON, and reuses the local `sec_feed.parser` helpers to enumerate the document set for every new accession number it sees.
 
 ## Getting started
@@ -14,7 +14,7 @@ A lightweight Python utility that polls the SEC EDGAR Latest Filings Atom feed, 
 2. **Provide a User-Agent** – SEC.gov blocks undeclared automated tools. Either export it once:
 
    ```bash
-   export SEC_USER_AGENT="FilingFetcher/0.1 (your-name@example.com)"
+   export SEC_USER_AGENT="Filing_Fetcher/0.1 (your-name@example.com)"
    ```
 
    or pass `--user-agent` on the command line. Pick something unique and reachable. Placeholder examples such as `contact@example.com` are rejected by the watcher to keep you compliant.
@@ -22,7 +22,7 @@ A lightweight Python utility that polls the SEC EDGAR Latest Filings Atom feed, 
 3. **Run the watcher** – it polls the Atom feed every 7 seconds (the SEC-recommended cadence) and throttles document downloads so the request rate stays well below the 10 rps ceiling:
 
    ```bash
-   python scripts/watch_sec_filings.py --user-agent "FilingFetcher/0.1 (name@example.com)"
+   python scripts/watch_sec_filings.py --user-agent "Filing_Fetcher/0.1 (name@example.com)"
    ```
 
    Useful flags:
@@ -51,7 +51,7 @@ Redirect stdout if you want to persist the feed, e.g. `python scripts/watch_sec_
 ## Project layout
 
 ```
-FilingFetcher/
+Filing_Fetcher/
 ├── scripts/
 │   ├── fetch_sec_docs.py      # Manual helper for specific index URLs.
 │   └── watch_sec_filings.py   # Atom feed poller + parser bridge.

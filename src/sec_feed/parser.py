@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from typing import Dict, List, Iterable, Optional
 
-DEFAULT_USER_AGENT = os.environ.get("SEC_USER_AGENT", "FilingFetcher/0.1 (contact@example.com)")
+DEFAULT_USER_AGENT = os.environ.get("SEC_USER_AGENT", "Filing_Fetcher/0.1 (contact@example.com)")
 UA = {"User-Agent": DEFAULT_USER_AGENT}
 
 def set_user_agent(user_agent: Optional[str]) -> None:
